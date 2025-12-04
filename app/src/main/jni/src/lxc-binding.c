@@ -1,0 +1,577 @@
+// Copyright © 2013, 2014, The Go-LXC Authors. All rights reserved.
+// Use of this source code is governed by a LGPLv2.1
+// license that can be found in the LICENSE file.
+
+// +build linux,cgo
+
+#include <errno.h>
+#include <stdbool.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <errno.h>
+
+#include <lxc/lxccontainer.h>
+#include <lxc/attach_options.h>
+#include <lxc/version.h>
+
+#include "lxc-binding.h"
+
+#ifndef LXC_DEVEL
+#define LXC_DEVEL 0
+#endif
+
+#define ret_errno(__errno__)         \
+	({                           \
+		errno = (__errno__); \
+		-(__errno__);        \
+	})
+
+bool jni_lxc_defined(struct lxc_container *c) {
+	return c->is_defined(c);
+}
+
+const char* jni_lxc_state(struct lxc_container *c) {
+	return c->state(c);
+}
+
+bool jni_lxc_running(struct lxc_container *c) {
+	return c->is_running(c);
+}
+
+bool jni_lxc_freeze(struct lxc_container *c) {
+	return c->freeze(c);
+}
+
+bool jni_lxc_unfreeze(struct lxc_container *c) {
+	return c->unfreeze(c);
+}
+
+pid_t jni_lxc_init_pid(struct lxc_container *c) {
+	return c->init_pid(c);
+}
+
+int jni_lxc_init_pidfd(struct lxc_container *c) {
+#if VERSION_AT_LEAST(4, 0, 0)
+	return c->init_pidfd(c);
+#else
+	return ret_errno(ENOSYS);
+#endif
+}
+
+int jni_lxc_seccomp_notify_fd(struct lxc_container *c) {
+#if VERSION_AT_LEAST(4, 0, 0)
+	return c->seccomp_notify_fd(c);
+#else
+	return ret_errno(ENOSYS);
+#endif
+}
+
+int jni_lxc_seccomp_notify_fd_active(struct lxc_container *c) {
+#if VERSION_AT_LEAST(4, 0, 5)
+	return c->seccomp_notify_fd_active(c);
+#else
+	return ret_errno(ENOSYS);
+#endif
+}
+
+int jni_lxc_set_timeout(struct lxc_container *c, int timeout) {
+#if VERSION_AT_LEAST(5, 0, 4)
+	if (!c->set_timeout(c, timeout))
+		return ret_errno(EINVAL);
+
+	return 0;
+#else
+	return ret_errno(ENOSYS);
+#endif
+}
+
+int jni_lxc_devpts_fd(struct lxc_container *c) {
+#if VERSION_AT_LEAST(4, 0, 5)
+	return c->devpts_fd(c);
+#else
+	return ret_errno(ENOSYS);
+#endif
+}
+
+bool jni_lxc_want_daemonize(struct lxc_container *c, bool state) {
+	return c->want_daemonize(c, state);
+}
+
+bool jni_lxc_want_close_all_fds(struct lxc_container *c, bool state) {
+	return c->want_close_all_fds(c, state);
+}
+
+bool jni_lxc_create(struct lxc_container *c, const char *t, const char *bdevtype, struct bdev_specs *specs, int flags, char * const argv[]) {
+	if (strncmp(t, "none", strlen(t)) == 0) {
+		return c->create(c, NULL, bdevtype, specs, !!(flags & LXC_CREATE_QUIET), argv);
+	}
+	return c->create(c, t, bdevtype, specs, !!(flags & LXC_CREATE_QUIET), argv);
+}
+
+bool jni_lxc_start(struct lxc_container *c, int useinit, char * const argv[]) {
+	return c->start(c, useinit, argv);
+}
+
+bool jni_lxc_stop(struct lxc_container *c) {
+	return c->stop(c);
+}
+
+bool jni_lxc_reboot(struct lxc_container *c) {
+	return c->reboot(c);
+}
+
+bool jni_lxc_shutdown(struct lxc_container *c, int timeout) {
+	return c->shutdown(c, timeout);
+}
+
+char* jni_lxc_config_file_name(struct lxc_container *c) {
+	return c->config_file_name(c);
+}
+
+bool jni_lxc_destroy(struct lxc_container *c) {
+	return c->destroy(c);
+}
+
+bool jni_lxc_destroy_with_snapshots(struct lxc_container *c) {
+#if VERSION_AT_LEAST(1, 1, 0)
+	return c->destroy_with_snapshots(c);
+#else
+	return false;
+#endif
+}
+
+bool jni_lxc_wait(struct lxc_container *c, const char *state, int timeout) {
+	return c->wait(c, state, timeout);
+}
+
+char *jni_lxc_get_config_item(struct lxc_container *c, const char *key)
+{
+	char *value = NULL;
+
+	int len = c->get_config_item(c, key, NULL, 0);
+	if (len <= 0)
+		return NULL;
+
+again:
+	value = (char *)malloc(sizeof(char) * len + 1);
+	if (value == NULL)
+		goto again;
+
+	if (c->get_config_item(c, key, value, len + 1) != len) {
+		free(value);
+		return NULL;
+	}
+
+	return value;
+}
+
+bool jni_lxc_set_config_item(struct lxc_container *c, const char *key, const char *value) {
+	return c->set_config_item(c, key, value);
+}
+
+void jni_lxc_clear_config(struct lxc_container *c) {
+	c->clear_config(c);
+}
+
+bool jni_lxc_clear_config_item(struct lxc_container *c, const char *key) {
+	return c->clear_config_item(c, key);
+}
+
+char* jni_lxc_get_running_config_item(struct lxc_container *c, const char *key) {
+	return c->get_running_config_item(c, key);
+}
+
+char *jni_lxc_get_keys(struct lxc_container *c, const char *key)
+{
+	char *value = NULL;
+
+	int len = c->get_keys(c, key, NULL, 0);
+	if (len <= 0)
+		return NULL;
+
+again:
+	value = (char *)malloc(sizeof(char) * len + 1);
+	if (value == NULL)
+		goto again;
+
+	if (c->get_keys(c, key, value, len + 1) != len) {
+		free(value);
+		return NULL;
+	}
+
+	return value;
+}
+
+char *jni_lxc_get_cgroup_item(struct lxc_container *c, const char *key)
+{
+	char *value = NULL;
+
+	int len = c->get_cgroup_item(c, key, NULL, 0);
+	if (len <= 0)
+		return NULL;
+
+again:
+	value = (char *)malloc(sizeof(char) * len + 1);
+	if (value == NULL)
+		goto again;
+
+	if (c->get_cgroup_item(c, key, value, len + 1) != len) {
+		free(value);
+		return NULL;
+	}
+
+	return value;
+}
+
+bool jni_lxc_set_cgroup_item(struct lxc_container *c, const char *key, const char *value) {
+	return c->set_cgroup_item(c, key, value);
+}
+
+const char* jni_lxc_get_config_path(struct lxc_container *c) {
+	return c->get_config_path(c);
+}
+
+bool jni_lxc_set_config_path(struct lxc_container *c, const char *path) {
+	return c->set_config_path(c, path);
+}
+
+bool jni_lxc_load_config(struct lxc_container *c, const char *alt_file) {
+	return c->load_config(c, alt_file);
+}
+
+bool jni_lxc_save_config(struct lxc_container *c, const char *alt_file) {
+	return c->save_config(c, alt_file);
+}
+
+bool jni_lxc_clone(struct lxc_container *c, const char *newname, const char *lxcpath, int flags, const char *bdevtype) {
+	struct lxc_container *c2 = c->clone(c, newname, lxcpath, flags, bdevtype, NULL, 0, NULL);
+	if (c2 == NULL) {
+		return false;
+	}
+	lxc_container_put(c2);
+	return true;
+}
+
+int jni_lxc_console_getfd(struct lxc_container *c, int ttynum) {
+	int mainfd;
+	int ret = 0;
+
+	ret = c->console_getfd(c, &ttynum, &mainfd);
+	if (ret < 0)
+		return ret;
+
+	return mainfd;
+}
+
+bool jni_lxc_console(struct lxc_container *c, int ttynum, int stdinfd, int stdoutfd, int stderrfd, int escape) {
+
+	if (c->console(c, ttynum, stdinfd, stdoutfd, stderrfd, escape) == 0) {
+		return true;
+	}
+	return false;
+}
+
+char** jni_lxc_get_interfaces(struct lxc_container *c) {
+	return c->get_interfaces(c);
+}
+
+char** jni_lxc_get_ips(struct lxc_container *c, const char *interface, const char *family, int scope) {
+	return c->get_ips(c, interface, family, scope);
+}
+
+int wait_for_pid_status(pid_t pid)
+{
+        int status, ret;
+
+again:
+        ret = waitpid(pid, &status, 0);
+        if (ret == -1) {
+                if (errno == EINTR)
+                        goto again;
+                return -1;
+        }
+        if (ret != pid)
+                goto again;
+        return status;
+}
+
+int jni_lxc_attach_no_wait(struct lxc_container *c,
+		bool clear_env,
+		int namespaces,
+		long personality,
+		uid_t uid, gid_t gid, lxc_groups_t groups,
+		int stdinfd, int stdoutfd, int stderrfd,
+		char *initial_cwd,
+		char **extra_env_vars,
+		char **extra_keep_env,
+		const char * const argv[],
+		pid_t *attached_pid,
+		int attach_flags) {
+	int ret;
+
+	lxc_attach_options_t attach_options = LXC_ATTACH_OPTIONS_DEFAULT;
+	attach_options.attach_flags = attach_flags;
+
+	lxc_attach_command_t command = (lxc_attach_command_t){.program = NULL};
+
+	attach_options.env_policy = LXC_ATTACH_KEEP_ENV;
+	if (clear_env) {
+		attach_options.env_policy = LXC_ATTACH_CLEAR_ENV;
+	}
+
+	attach_options.namespaces = namespaces;
+	attach_options.personality = personality;
+
+	attach_options.uid = uid;
+	attach_options.gid = gid;
+#if VERSION_AT_LEAST(4, 0, 9)
+	if ( groups.size > 0 ) {
+		attach_options.groups = groups;
+		attach_options.attach_flags &= LXC_ATTACH_SETGROUPS;
+	}
+#endif
+
+	attach_options.stdin_fd = stdinfd;
+	attach_options.stdout_fd = stdoutfd;
+	attach_options.stderr_fd = stderrfd;
+
+	attach_options.initial_cwd = initial_cwd;
+	attach_options.extra_env_vars = extra_env_vars;
+	attach_options.extra_keep_env = extra_keep_env;
+
+	command.program = (char *)argv[0];
+	command.argv = (char **)argv;
+
+	ret = c->attach(c, lxc_attach_run_command, &command, &attach_options, attached_pid);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
+int jni_lxc_attach(struct lxc_container *c,
+		bool clear_env,
+		int namespaces,
+		long personality,
+		uid_t uid, gid_t gid, lxc_groups_t groups,
+		int stdinfd, int stdoutfd, int stderrfd,
+		char *initial_cwd,
+		char **extra_env_vars,
+		char **extra_keep_env,
+		int attach_flags) {
+	int ret;
+	pid_t pid;
+
+	lxc_attach_options_t attach_options = LXC_ATTACH_OPTIONS_DEFAULT;
+	attach_options.attach_flags = attach_flags;
+
+	attach_options.env_policy = LXC_ATTACH_KEEP_ENV;
+	if (clear_env) {
+		attach_options.env_policy = LXC_ATTACH_CLEAR_ENV;
+	}
+
+	attach_options.namespaces = namespaces;
+	attach_options.personality = personality;
+
+	attach_options.uid = uid;
+	attach_options.gid = gid;
+#if VERSION_AT_LEAST(4, 0, 9)
+	if ( groups.size > 0 ) {
+		attach_options.groups = groups;
+		attach_options.attach_flags &= LXC_ATTACH_SETGROUPS;
+	}
+#endif
+
+	attach_options.stdin_fd = stdinfd;
+	attach_options.stdout_fd = stdoutfd;
+	attach_options.stderr_fd = stderrfd;
+
+	attach_options.initial_cwd = initial_cwd;
+	attach_options.extra_env_vars = extra_env_vars;
+	attach_options.extra_keep_env = extra_keep_env;
+
+	ret = c->attach(c, lxc_attach_run_shell, NULL, &attach_options, &pid);
+	if (ret < 0)
+		return ret;
+
+	ret = wait_for_pid_status(pid);
+	if (ret < 0)
+		return ret;
+
+	if (WIFEXITED(ret))
+		return WEXITSTATUS(ret);
+
+	return ret;
+}
+
+int jni_lxc_attach_run_wait(struct lxc_container *c,
+		bool clear_env,
+		int namespaces,
+		long personality,
+		uid_t uid, gid_t gid, lxc_groups_t groups,
+		int stdinfd, int stdoutfd, int stderrfd,
+		char *initial_cwd,
+		char **extra_env_vars,
+		char **extra_keep_env,
+		const char * const argv[],
+		int attach_flags) {
+	int ret;
+
+	lxc_attach_options_t attach_options = LXC_ATTACH_OPTIONS_DEFAULT;
+	attach_options.attach_flags = attach_flags;
+
+	attach_options.env_policy = LXC_ATTACH_KEEP_ENV;
+	if (clear_env) {
+		attach_options.env_policy = LXC_ATTACH_CLEAR_ENV;
+	}
+
+	attach_options.namespaces = namespaces;
+	attach_options.personality = personality;
+
+	attach_options.uid = uid;
+	attach_options.gid = gid;
+#if VERSION_AT_LEAST(4, 0, 9)
+	if ( groups.size > 0 ) {
+		attach_options.groups = groups;
+		attach_options.attach_flags &= LXC_ATTACH_SETGROUPS;
+	}
+#endif
+
+	attach_options.stdin_fd = stdinfd;
+	attach_options.stdout_fd = stdoutfd;
+	attach_options.stderr_fd = stderrfd;
+
+	attach_options.initial_cwd = initial_cwd;
+	attach_options.extra_env_vars = extra_env_vars;
+	attach_options.extra_keep_env = extra_keep_env;
+
+	ret = c->attach_run_wait(c, &attach_options, argv[0], argv);
+	if (WIFEXITED(ret) && WEXITSTATUS(ret) == 255)
+		return -1;
+	return ret;
+}
+
+bool jni_lxc_may_control(struct lxc_container *c) {
+	return c->may_control(c);
+}
+
+int jni_lxc_snapshot(struct lxc_container *c) {
+	return c->snapshot(c, NULL);
+}
+
+int jni_lxc_snapshot_list(struct lxc_container *c, struct lxc_snapshot **ret) {
+	return c->snapshot_list(c, ret);
+}
+
+bool jni_lxc_snapshot_restore(struct lxc_container *c, const char *snapname, const char *newname) {
+	return c->snapshot_restore(c, snapname, newname);
+}
+
+bool jni_lxc_snapshot_destroy(struct lxc_container *c, const char *snapname) {
+	return c->snapshot_destroy(c, snapname);
+}
+
+bool jni_lxc_snapshot_destroy_all(struct lxc_container *c) {
+#if VERSION_AT_LEAST(1, 1, 0)
+	return c->snapshot_destroy_all(c);
+#else
+	return false;
+#endif
+
+}
+
+bool jni_lxc_add_device_node(struct lxc_container *c, const char *src_path, const char *dest_path) {
+	return c->add_device_node(c, src_path, dest_path);
+}
+
+bool jni_lxc_remove_device_node(struct lxc_container *c, const char *src_path, const char *dest_path) {
+	return c->remove_device_node(c, src_path, dest_path);
+}
+
+bool jni_lxc_rename(struct lxc_container *c, const char *newname) {
+	return c->rename(c, newname);
+}
+
+bool jni_lxc_checkpoint(struct lxc_container *c, char *directory, bool stop, bool verbose) {
+#if VERSION_AT_LEAST(1, 1, 0)
+	return c->checkpoint(c, directory, stop, verbose);
+#else
+	return false;
+#endif
+}
+
+bool jni_lxc_restore(struct lxc_container *c, char *directory, bool verbose) {
+#if VERSION_AT_LEAST(1, 1, 0)
+	return c->restore(c, directory, verbose);
+#else
+	return false;
+#endif
+}
+
+int jni_lxc_migrate(struct lxc_container *c, unsigned int cmd, struct migrate_opts *opts, struct extra_migrate_opts *extras) {
+#if VERSION_AT_LEAST(3, 0, 0)
+	opts->features_to_check = extras->features_to_check;
+#endif
+#if VERSION_AT_LEAST(2, 0, 4)
+	opts->action_script = extras->action_script;
+	opts->ghost_limit = extras->ghost_limit;
+#endif
+
+#if VERSION_AT_LEAST(2, 0, 1)
+	opts->preserves_inodes = extras->preserves_inodes;
+#endif
+
+#if VERSION_AT_LEAST(2, 0, 0)
+	return c->migrate(c, cmd, opts, sizeof(*opts));
+#else
+	return -EINVAL;
+#endif
+}
+
+bool jni_lxc_attach_interface(struct lxc_container *c, const char *dev, const char *dst_dev) {
+#if VERSION_AT_LEAST(1, 1, 0)
+	return c->attach_interface(c, dev, dst_dev);
+#else
+	return false;
+#endif
+}
+
+bool jni_lxc_detach_interface(struct lxc_container *c, const char *dev, const char *dst_dev) {
+#if VERSION_AT_LEAST(1, 1, 0)
+	return c->detach_interface(c, dev, dst_dev);
+#else
+	return false;
+#endif
+}
+
+bool jni_lxc_config_item_is_supported(const char *key)
+{
+#if VERSION_AT_LEAST(2, 1, 0)
+	return lxc_config_item_is_supported(key);
+#else
+	return false;
+#endif
+}
+
+int jni_lxc_error_num(struct lxc_container *c)
+{
+	return c->error_num;
+}
+
+int jni_lxc_console_log(struct lxc_container *c, struct lxc_console_log *log) {
+#if VERSION_AT_LEAST(3, 0, 0)
+	return c->console_log(c, log);
+#else
+	return false;
+#endif
+}
+
+bool jni_lxc_has_api_extension(const char *extension)
+{
+#if VERSION_AT_LEAST(3, 1, 0)
+	return lxc_has_api_extension(extension);
+#else
+	return false;
+#endif
+}
