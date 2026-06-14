@@ -89,6 +89,7 @@ interface ILxc {
     boolean hasApiExtension(String extension);
 
     // Passive monitor (uses LXC's lxc_monitor API, lxcpath may be null for default)
+    int ensureMonitord(String lxcpath);
     long openMonitor(String lxcpath);
     int closeMonitor(long handle);
     String[] readMonitorEvent(long handle);

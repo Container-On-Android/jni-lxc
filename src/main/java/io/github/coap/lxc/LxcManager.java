@@ -156,6 +156,32 @@ public class LxcManager {
     }
 
     /**
+     * Spawn {@code lxc-monitord} for the default lxcpath if it is not
+     * already running. Idempotent: if monitord is up, the spawned one
+     * exits because the FIFO/socket is held by the existing process.
+     * Call this before {@link #openMonitor()} so the very first
+     * subscription does not race against monitord startup.
+     */
+    public int ensureMonitord() {
+        return ensureMonitord(defaultLxcPath);
+    }
+
+    /**
+     * Spawn {@code lxc-monitord} for the given lxcpath if it is not
+     * already running. See {@link #ensureMonitord()}.
+     *
+     * @return 0 on success, negative on error.
+     */
+    public int ensureMonitord(String lxcpath) {
+        try {
+            return service.ensureMonitord(lxcpath);
+        } catch (RemoteException e) {
+            Log.e(TAG, "Failed to ensure monitord: " + e.getMessage());
+            return -1;
+        }
+    }
+
+    /**
      * Open a passive monitor on the given lxcpath.
      *
      * @return a {@link LxcMonitor} instance, or {@code null} on failure.

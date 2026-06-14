@@ -355,6 +355,14 @@ public class LxcNative extends RootService {
         }
 
         @Override
+        public int ensureMonitord(String lxcpath) {
+            String path = (lxcpath == null || lxcpath.isEmpty()) ? LXC_PATH : lxcpath;
+            int ret = nativeEnsureMonitord(path);
+            Log.d(TAG, "ensureMonitord path=" + path + " ret=" + ret);
+            return ret;
+        }
+
+        @Override
         public long openMonitor(String lxcpath) {
             String path = (lxcpath == null || lxcpath.isEmpty()) ? LXC_PATH : lxcpath;
             long nativeHandle = nativeOpenMonitor(path);
@@ -481,6 +489,7 @@ public class LxcNative extends RootService {
     private static native long nativeOpenMonitor(String lxcpath);
     private static native int nativeCloseMonitor(long handle);
     private static native String[] nativeReadMonitorEvent(long handle);
+    private static native int nativeEnsureMonitord(String lxcpath);
 
     @Override
     public void onCreate() {

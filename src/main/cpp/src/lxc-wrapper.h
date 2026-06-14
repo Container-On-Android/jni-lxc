@@ -41,6 +41,11 @@ __attribute__((weak)) int lxc_monitor_close(struct lxc_monitor *mon);
 __attribute__((weak)) int lxc_monitor_read(struct lxc_monitor *mon, struct lxc_msg *msg);
 __attribute__((weak)) const char *lxc_state2str(int state);
 
+/* Ensures lxc-monitord is running for the given lxcpath. Idempotent: if
+ * a monitord is already running on that path, the new one exits because
+ * the FIFO write lock is held. */
+__attribute__((weak)) int lxc_monitord_spawn(const char *lxcpath);
+
 #ifdef __cplusplus
 }
 #endif

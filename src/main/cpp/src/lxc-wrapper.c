@@ -1154,6 +1154,93 @@ __attribute__((weak)) const char *lxc_state2str(int state) {
     }
 }
 
+/* Weak fallback for lxc_monitord_spawn.
+ *
+ * liblxc.a exports a strong lxc_monitord_spawn (T symbol) that uses the
+ * LXC_MONITORD_PATH compiled into the library (the LIBEXECDIR prefix from
+ * the LXC build). When that strong symbol is linked this fallback is
+ * discarded by the linker, and the real spawn is used. The fallback below
+ * is only used in builds without a linked liblxc.a.
+ *
+ * The pattern mirrors lxc-monitor CLI's lxc_tool_monitord_spawn():
+ *   - double-fork to avoid zombies
+ *   - middle child blocks on a pipe; grandchild exec's lxc-monitord which
+ *     closes the pipe fd once the abstract socket is up. The middle child
+ *     then exits so only monitord remains.
+ *
+ * Idempotent: if monitord is already running, the new monitord process
+ * fails to grab the lock and exits, but the existing one is still up.
+ */
+static const char * const kMonitordFallbackPaths[] = {
+    "/data/share/libexec/lxc/lxc-monitord",
+    "/data/lxc/libexec/lxc/lxc-monitord",
+    "/system_ext/bin/lxc-monitord",
+    "/system/bin/lxc-monitord",
+    "/vendor/bin/lxc-monitord",
+    "lxc-monitord",
+    NULL,
+};
+
+static int spawn_monitord_at(const char *path, const char *lxcpath) {
+    int pipefd[2];
+    char pipefd_str[16];
+    pid_t pid;
+
+    if (pipe(pipefd) < 0) {
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+    if (pid > 0) {
+        char c;
+        close(pipefd[1]);
+        /* Wait for grandchild (monitord) to close the pipe; we ignore
+         * the read result because we're just synchronizing. */
+        ssize_t r = read(pipefd[0], &c, 1);
+        (void)r;
+        close(pipefd[0]);
+        /* Reap the middle child so we don't leave a zombie. */
+        waitpid(pid, NULL, 0);
+        return 0;
+    }
+
+    /* Middle child: detach, then exec the monitord. */
+    if (setsid() < 0) {
+        _exit(127);
+    }
+    close(pipefd[0]);
+    int n = snprintf(pipefd_str, sizeof(pipefd_str), "%d", pipefd[1]);
+    if (n < 0 || (size_t)n >= sizeof(pipefd_str)) {
+        _exit(127);
+    }
+    char *const args[] = {
+        (char *)path,
+        (char *)lxcpath,
+        pipefd_str,
+        NULL,
+    };
+    execvp(args[0], args);
+    _exit(127);
+}
+
+__attribute__((weak)) int lxc_monitord_spawn(const char *lxcpath) {
+    if (lxcpath == NULL) {
+        return -1;
+    }
+    for (int i = 0; kMonitordFallbackPaths[i] != NULL; i++) {
+        if (access(kMonitordFallbackPaths[i], X_OK) == 0) {
+            return spawn_monitord_at(kMonitordFallbackPaths[i], lxcpath);
+        }
+    }
+    /* Last resort: rely on PATH lookup. */
+    return spawn_monitord_at("lxc-monitord", lxcpath);
+}
+
 JNIEXPORT jlong JNICALL
 Java_io_github_coap_lxc_LxcNative_nativeOpenMonitor(JNIEnv *env, jclass clazz, jstring lxcpath) {
     const char *lxcpath_str = lxcpath == NULL ? NULL : (*env)->GetStringUTFChars(env, lxcpath, NULL);
@@ -1164,6 +1251,21 @@ Java_io_github_coap_lxc_LxcNative_nativeOpenMonitor(JNIEnv *env, jclass clazz, j
     struct lxc_monitor *mon = lxc_monitor_open(lxcpath_str);
     (*env)->ReleaseStringUTFChars(env, lxcpath, lxcpath_str);
     return (jlong)(intptr_t)mon;
+}
+
+JNIEXPORT jint JNICALL
+Java_io_github_coap_lxc_LxcNative_nativeEnsureMonitord(JNIEnv *env, jclass clazz, jstring lxcpath) {
+    const char *lxcpath_str = lxcpath == NULL ? NULL : (*env)->GetStringUTFChars(env, lxcpath, NULL);
+    if (lxcpath_str == NULL) {
+        return -1;
+    }
+
+    /* Calls the strong lxc_monitord_spawn from liblxc.a when linked; the
+     * weak fallback above otherwise. Both are idempotent: if monitord is
+     * already up, the spawned one exits because the FIFO/socket is held. */
+    int ret = lxc_monitord_spawn(lxcpath_str);
+    (*env)->ReleaseStringUTFChars(env, lxcpath, lxcpath_str);
+    return ret;
 }
 
 JNIEXPORT jint JNICALL
@@ -1279,6 +1381,7 @@ static JNINativeMethod gMethods[] = {
     {"nativeOpenMonitor", "(Ljava/lang/String;)J", (void *)Java_io_github_coap_lxc_LxcNative_nativeOpenMonitor},
     {"nativeCloseMonitor", "(J)I", (void *)Java_io_github_coap_lxc_LxcNative_nativeCloseMonitor},
     {"nativeReadMonitorEvent", "(J)[Ljava/lang/String;", (void *)Java_io_github_coap_lxc_LxcNative_nativeReadMonitorEvent},
+    {"nativeEnsureMonitord", "(Ljava/lang/String;)I", (void *)Java_io_github_coap_lxc_LxcNative_nativeEnsureMonitord},
 };
 
 static const char *kClassName = "io/github/coap/lxc/LxcNative";
