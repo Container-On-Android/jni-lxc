@@ -8,6 +8,11 @@ import androidx.annotation.NonNull;
 
 import com.topjohnwu.superuser.ipc.RootService;
 
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicLong;
+
 import io.github.coap.ILxc;
 
 public class LxcNative extends RootService {
@@ -23,6 +28,37 @@ public class LxcNative extends RootService {
 
     @SuppressWarnings({"JniMissingFunction", "unused"})
     static class LxcIPC extends ILxc.Stub {
+        private static final String TAG = "LxcIPC";
+
+        private static final class MonitorEntry {
+            final long nativeHandle;
+            final BlockingQueue<String[]> queue = new LinkedBlockingQueue<>();
+            final Thread readerThread;
+            volatile boolean closed = false;
+
+            MonitorEntry(long nativeHandle, long publicHandle) {
+                this.nativeHandle = nativeHandle;
+                this.readerThread = new Thread(() -> {
+                    try {
+                        while (!closed) {
+                            String[] event = nativeReadMonitorEvent(nativeHandle);
+                            if (event == null || closed) {
+                                break;
+                            }
+                            queue.offer(event);
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "Monitor reader terminated: " + t.getMessage());
+                    }
+                }, "LxcMonitorReader-" + publicHandle);
+                this.readerThread.setDaemon(true);
+                this.readerThread.start();
+            }
+        }
+
+        private final ConcurrentHashMap<Long, MonitorEntry> monitorEntries = new ConcurrentHashMap<>();
+        private final AtomicLong nextHandle = new AtomicLong(1);
+
         @Override
         public int getUid() {
             return 0;
@@ -317,7 +353,70 @@ public class LxcNative extends RootService {
         public boolean hasApiExtension(String extension) {
             return nativeHasApiExtension(extension);
         }
+
+        @Override
+        public long openMonitor(String lxcpath) {
+            String path = (lxcpath == null || lxcpath.isEmpty()) ? LXC_PATH : lxcpath;
+            long nativeHandle = nativeOpenMonitor(path);
+            if (nativeHandle == 0) {
+                Log.e(TAG, "Failed to open LXC monitor for " + path);
+                return 0;
+            }
+            long handle = nextHandle.getAndIncrement();
+            MonitorEntry entry = new MonitorEntry(nativeHandle, handle);
+            monitorEntries.put(handle, entry);
+            Log.d(TAG, "Opened LXC monitor handle=" + handle);
+            return handle;
+        }
+
+        @Override
+        public int closeMonitor(long handle) {
+            MonitorEntry entry = monitorEntries.remove(handle);
+            if (entry == null) {
+                return -1;
+            }
+            entry.closed = true;
+            int ret = nativeCloseMonitor(entry.nativeHandle);
+            entry.readerThread.interrupt();
+            // Unblock any pending readMonitorEvent with a sentinel value.
+            entry.queue.offer(new String[0]);
+            Log.d(TAG, "Closed LXC monitor handle=" + handle + " ret=" + ret);
+            return ret;
+        }
+
+        @Override
+        public String[] readMonitorEvent(long handle) {
+            MonitorEntry entry = monitorEntries.get(handle);
+            if (entry == null) {
+                return null;
+            }
+            try {
+                String[] event = entry.queue.take();
+                if (event.length == 0) {
+                    return null; // sentinel pushed on close
+                }
+                return event;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+
+        /* package */ void closeAllMonitors() {
+            // Snapshot the key set to avoid concurrent modification while
+            // closeMonitor() removes entries from the map.
+            Long[] handles = monitorEntries.keySet().toArray(new Long[0]);
+            for (Long handle : handles) {
+                try {
+                    closeMonitor(handle);
+                } catch (Throwable t) {
+                    Log.e(TAG, "closeAllMonitors error: " + t.getMessage());
+                }
+            }
+        }
     }
+
+    private final LxcIPC ipc = new LxcIPC();
 
     @SuppressWarnings("JniMissingFunction")
     private static native String nativeGetVersion();
@@ -379,6 +478,9 @@ public class LxcNative extends RootService {
     private static native int nativeGetErrorNum(String name, String lxcpath);
     private static native boolean nativeConfigItemIsSupported(String key);
     private static native boolean nativeHasApiExtension(String extension);
+    private static native long nativeOpenMonitor(String lxcpath);
+    private static native int nativeCloseMonitor(long handle);
+    private static native String[] nativeReadMonitorEvent(long handle);
 
     @Override
     public void onCreate() {
@@ -394,7 +496,7 @@ public class LxcNative extends RootService {
     @Override
     public IBinder onBind(@NonNull Intent intent) {
         Log.d("LXC", "LXC Service Bound");
-        return new LxcIPC();
+        return ipc;
     }
 
     @Override
@@ -406,6 +508,7 @@ public class LxcNative extends RootService {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        ipc.closeAllMonitors();
         Log.d("LXC", "LXC Service Destroyed");
     }
 }

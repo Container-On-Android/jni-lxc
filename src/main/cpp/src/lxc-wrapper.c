@@ -1,12 +1,20 @@
 #include <jni.h>
+#include <stdint.h>
 #include <lxc/lxccontainer.h>
 #include <lxc/attach_options.h>
 #include <lxc/version.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
+#include <unistd.h>
+
+#include "lxc-wrapper.h"
 
 #include "lxc-binding.h"
 
@@ -1010,6 +1018,204 @@ Java_io_github_coap_lxc_LxcNative_nativeDestroyWithSnapshots(JNIEnv *env, jclass
     return result ? JNI_TRUE : JNI_FALSE;
 }
 
+/* ----------------------------------------------------------------------------
+ * LXC monitor (talks to lxc-monitord over an abstract Unix domain socket).
+ *
+ * Wire format (struct lxc_msg):
+ *   int           type   — enum lxc_msg_type (0 = lxc_msg_state, 1 = lxc_msg_exit_code)
+ *   int           value  — lxc_state_t for lxc_msg_state, exit code otherwise
+ *   char name[4096]      — NUL-terminated container name
+ *
+ * lxc-monitord reads sizeof(struct lxc_msg) from the publisher FIFO and
+ * writes the same to every subscribed client fd, so a single lxc_monitor_read
+ * yields the full record. This is what the lxc-monitor CLI tool relies on.
+ *
+ * liblxc.a exports strong implementations of lxc_monitor_open/close/read and
+ * lxc_state2str. The weak fallbacks below are kept for the case where the
+ * project is built without those symbols.
+ * --------------------------------------------------------------------------*/
+
+struct lxc_monitor {
+    int fd;
+};
+
+static int lxc_abstract_unix_connect(const char *path) {
+    int fd;
+    struct sockaddr_un addr;
+    size_t path_len;
+
+    fd = socket(PF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    path_len = strlen(path);
+    if (path_len >= sizeof(addr.sun_path)) {
+        close(fd);
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    /* Abstract namespace: leading NUL byte, then the literal path. */
+    addr.sun_path[0] = '\0';
+    memcpy(addr.sun_path + 1, path, path_len);
+
+    if (connect(fd, (struct sockaddr *)&addr,
+                offsetof(struct sockaddr_un, sun_path) + 1 + path_len) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Read exactly n bytes from fd, retrying on partial reads. */
+static ssize_t lxc_read_exact(int fd, void *buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, (char *)buf + got, n - got);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) {
+            return -1; /* unexpected EOF */
+        }
+        got += (size_t)r;
+    }
+    return (ssize_t)got;
+}
+
+__attribute__((weak)) struct lxc_monitor *lxc_monitor_open(const char *lxcpath) {
+    if (lxcpath == NULL) {
+        return NULL;
+    }
+
+    char sock_path[PATH_MAX];
+    int written = snprintf(sock_path, sizeof(sock_path),
+                           "%s/monitor-sock", lxcpath);
+    if (written <= 0 || written >= (int)sizeof(sock_path)) {
+        return NULL;
+    }
+
+    int fd = lxc_abstract_unix_connect(sock_path);
+    if (fd < 0) {
+        return NULL;
+    }
+
+    struct lxc_monitor *mon = calloc(1, sizeof(*mon));
+    if (mon == NULL) {
+        close(fd);
+        return NULL;
+    }
+    mon->fd = fd;
+    return mon;
+}
+
+__attribute__((weak)) int lxc_monitor_close(struct lxc_monitor *mon) {
+    if (mon == NULL) {
+        return -1;
+    }
+    if (mon->fd >= 0) {
+        /* Tell lxc-monitord we're done. Best effort: ignore errors. */
+        ssize_t r = write(mon->fd, "quit", 4);
+        (void)r;
+        close(mon->fd);
+        mon->fd = -1;
+    }
+    free(mon);
+    return 0;
+}
+
+__attribute__((weak)) int lxc_monitor_read(struct lxc_monitor *mon, struct lxc_msg *msg) {
+    if (mon == NULL || msg == NULL || mon->fd < 0) {
+        return -1;
+    }
+    /* monitord writes the full struct in one shot. */
+    if (lxc_read_exact(mon->fd, msg, sizeof(*msg)) < 0) {
+        return -1;
+    }
+    msg->name[sizeof(msg->name) - 1] = '\0';
+    return 0;
+}
+
+__attribute__((weak)) const char *lxc_state2str(int state) {
+    switch (state) {
+        case 0: return "STOPPED";
+        case 1: return "STARTING";
+        case 2: return "RUNNING";
+        case 3: return "STOPPING";
+        case 4: return "ABORTING";
+        case 5: return "FREEZING";
+        case 6: return "FROZEN";
+        case 7: return "THAWED";
+        case 8: return "MAX_STATE";
+        default: return "UNKNOWN";
+    }
+}
+
+JNIEXPORT jlong JNICALL
+Java_io_github_coap_lxc_LxcNative_nativeOpenMonitor(JNIEnv *env, jclass clazz, jstring lxcpath) {
+    const char *lxcpath_str = lxcpath == NULL ? NULL : (*env)->GetStringUTFChars(env, lxcpath, NULL);
+    if (lxcpath_str == NULL) {
+        return 0;
+    }
+
+    struct lxc_monitor *mon = lxc_monitor_open(lxcpath_str);
+    (*env)->ReleaseStringUTFChars(env, lxcpath, lxcpath_str);
+    return (jlong)(intptr_t)mon;
+}
+
+JNIEXPORT jint JNICALL
+Java_io_github_coap_lxc_LxcNative_nativeCloseMonitor(JNIEnv *env, jclass clazz, jlong handle) {
+    struct lxc_monitor *mon = (struct lxc_monitor *)(intptr_t)handle;
+    if (mon == NULL) {
+        return -1;
+    }
+    return lxc_monitor_close(mon);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_io_github_coap_lxc_LxcNative_nativeReadMonitorEvent(JNIEnv *env, jclass clazz, jlong handle) {
+    struct lxc_monitor *mon = (struct lxc_monitor *)(intptr_t)handle;
+    if (mon == NULL) {
+        return NULL;
+    }
+
+    /* sizeof(struct lxc_msg) already includes the full name[] array. */
+    struct lxc_msg *msg = malloc(sizeof(*msg));
+    if (msg == NULL) {
+        return NULL;
+    }
+    memset(msg, 0, sizeof(*msg));
+
+    int ret = lxc_monitor_read(mon, msg);
+    if (ret < 0) {
+        free(msg);
+        return NULL;
+    }
+
+    char type_str[16];
+    snprintf(type_str, sizeof(type_str), "%d", (int)msg->type);
+
+    char value_str[16];
+    snprintf(value_str, sizeof(value_str), "%d", msg->value);
+
+    const char *state_str = (msg->type == lxc_msg_state)
+        ? lxc_state2str(msg->value)
+        : "";
+
+    jclass string_class = (*env)->FindClass(env, "java/lang/String");
+    jobjectArray result = (*env)->NewObjectArray(env, 4, string_class, NULL);
+    (*env)->SetObjectArrayElement(env, result, 0, (*env)->NewStringUTF(env, type_str));
+    (*env)->SetObjectArrayElement(env, result, 1, (*env)->NewStringUTF(env, msg->name));
+    (*env)->SetObjectArrayElement(env, result, 2, (*env)->NewStringUTF(env, state_str));
+    (*env)->SetObjectArrayElement(env, result, 3, (*env)->NewStringUTF(env, value_str));
+
+    free(msg);
+    return result;
+}
+
 static JNINativeMethod gMethods[] = {
     {"nativeGetVersion", "()Ljava/lang/String;", (void *)Java_io_github_coap_lxc_LxcNative_nativeGetVersion},
     {"nativeListContainers", "(Ljava/lang/String;)[Ljava/lang/String;", (void *)Java_io_github_coap_lxc_LxcNative_nativeListContainers},
@@ -1070,6 +1276,9 @@ static JNINativeMethod gMethods[] = {
     {"nativeHasApiExtension", "(Ljava/lang/String;)Z", (void *)Java_io_github_coap_lxc_LxcNative_nativeHasApiExtension},
     {"nativeCreate", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I[Ljava/lang/String;)Z", (void *)Java_io_github_coap_lxc_LxcNative_nativeCreate},
     {"nativeDestroyWithSnapshots", "(Ljava/lang/String;Ljava/lang/String;)Z", (void *)Java_io_github_coap_lxc_LxcNative_nativeDestroyWithSnapshots},
+    {"nativeOpenMonitor", "(Ljava/lang/String;)J", (void *)Java_io_github_coap_lxc_LxcNative_nativeOpenMonitor},
+    {"nativeCloseMonitor", "(J)I", (void *)Java_io_github_coap_lxc_LxcNative_nativeCloseMonitor},
+    {"nativeReadMonitorEvent", "(J)[Ljava/lang/String;", (void *)Java_io_github_coap_lxc_LxcNative_nativeReadMonitorEvent},
 };
 
 static const char *kClassName = "io/github/coap/lxc/LxcNative";

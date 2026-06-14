@@ -146,6 +146,34 @@ public class LxcManager {
         return version != null;
     }
 
+    /**
+     * Open a passive monitor on the default lxcpath. The returned
+     * {@link LxcMonitor} blocks on {@link LxcMonitor#readNext()} until
+     * the next container state-change event is published by lxc-monitord.
+     */
+    public LxcMonitor openMonitor() {
+        return openMonitor(defaultLxcPath);
+    }
+
+    /**
+     * Open a passive monitor on the given lxcpath.
+     *
+     * @return a {@link LxcMonitor} instance, or {@code null} on failure.
+     */
+    public LxcMonitor openMonitor(String lxcpath) {
+        try {
+            long handle = service.openMonitor(lxcpath);
+            if (handle == 0) {
+                Log.e(TAG, "Failed to open monitor for " + lxcpath);
+                return null;
+            }
+            return new LxcMonitor(service, handle);
+        } catch (RemoteException e) {
+            Log.e(TAG, "Failed to open monitor: " + e.getMessage());
+            return null;
+        }
+    }
+
     @Override
     public String toString() {
         return String.format("LxcManager{defaultPath='%s', version='%s'}",
